@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>墨泉 · AI 小说生成器</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=ZCOOL+XiaoWei&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div id="app">
+  <!-- ===== 顶部导航 ===== -->
+  <header class="topbar">
+    <div class="topbar-brand" id="btn-home" title="回到书架">
+      <span class="brand-mark">墨</span>
+      <span class="brand-name">墨泉</span>
+      <span class="brand-sub">AI 小说生成器</span>
+    </div>
+    <div class="topbar-actions">
+      <button class="tbtn" id="btn-shelf"><span class="tbtn-ico">📚</span>书架</button>
+      <button class="tbtn" id="btn-ai"><span class="tbtn-ico" id="ai-status-dot">🤖</span>AI 设置</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===== 书架视图 ===== -->
+    <section id="view-shelf" class="view">
+      <div class="shelf-hero">
+        <h1 class="shelf-title">你的小说世界</h1>
+        <p class="shelf-desc">从一句话开始，生成大纲、角色与完整正文。<br>本地引擎离线可用，配置 AI 后智能程度再上一层。</p>
+        <button class="btn btn-primary btn-lg" id="btn-new-novel"><span>＋</span> 创作新小说</button>
+      </div>
+      <div class="shelf-grid" id="shelf-grid"></div>
+    </section>
+
+    <!-- ===== 创建向导视图 ===== -->
+    <section id="view-create" class="view hidden">
+      <div class="create-layout">
+        <div class="create-form card">
+          <div class="card-head">
+            <h2>创作新小说</h2>
+            <p class="muted">填写你的设定，或者直接点击「随机生成」让灵感降临。</p>
+          </div>
+
+          <div class="field">
+            <label>题材</label>
+            <div class="genre-chips" id="genre-chips"></div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label>书名 <span class="hint">（可留空自动起名）</span></label>
+              <input type="text" id="f-title" placeholder="例：苍梧之渊" maxlength="24">
+            </div>
+            <div class="field">
+              <label>章节数 <span class="hint">（5–9999 章，自由设定）</span></label>
+              <input type="number" id="f-chapters" min="5" max="9999" step="1" value="16">
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label>主角名 <span class="hint">（留空随机）</span></label>
+              <input type="text" id="f-protagonist" placeholder="例：苏晚晴" maxlength="10">
+            </div>
+            <div class="field">
+              <label>文风</label>
+              <select id="f-style">
+                <option value="ancient">古风典雅</option>
+                <option value="fierce" selected>热血激昂</option>
+                <option value="mystery">冷峻悬疑</option>
+                <option value="lyric">细腻文艺</option>
+                <option value="humor">诙谐轻快</option>
+                <option value="epic">史诗宏阔</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>核心冲突 <span class="hint">（一句话，留空自动生成）</span></label>
+            <textarea id="f-conflict" rows="2" placeholder="例：废弃古城的少年发现自己的血能开启上古封印，而封印之下，是沉睡千年的真相……"></textarea>
+          </div>
+
+          <div class="field">
+            <label>世界观 / 背景补充 <span class="hint">（选填）</span></label>
+            <textarea id="f-world" rows="2" placeholder="例：灵气复苏百年后的东方大陆，宗门林立，凡人仰望星空。" maxlength="120"></textarea>
+          </div>
+
+          <div class="create-actions">
+            <button class="btn btn-ghost" id="btn-random">🎲 一键随机设定</button>
+            <button class="btn btn-primary btn-lg" id="btn-create">✦ 开始创作</button>
+          </div>
+        </div>
+
+        <div class="create-preview">
+          <div class="preview-card card">
+            <div class="preview-ribbon">设定预览</div>
+            <div class="preview-body" id="preview-body">
+              <div class="preview-placeholder">设定会显示在这里<br><span class="muted">试试「一键随机设定」</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 工作台视图 ===== -->
+    <section id="view-studio" class="view hidden">
+      <div class="studio">
+        <aside class="studio-side card" id="studio-side">
+          <div class="side-novel" id="side-novel"></div>
+          <div class="side-divider"></div>
+          <div class="side-section-title">章节</div>
+          <div class="chapter-list" id="chapter-list"></div>
+        </aside>
+
+        <div class="studio-main">
+          <div class="studio-tabs" id="studio-tabs">
+            <button class="stab active" data-tab="outline">📜 大纲</button>
+            <button class="stab" data-tab="characters">👥 角色</button>
+            <button class="stab" data-tab="writer">✍️ 写作台</button>
+          </div>
+
+          <div class="studio-tabpane active" id="tab-outline"></div>
+          <div class="studio-tabpane" id="tab-characters"></div>
+          <div class="studio-tabpane" id="tab-writer"></div>
+        </div>
+
+        <aside class="studio-inspire card" id="studio-inspire">
+          <div class="inspire-head">
+            <span>灵感笔记</span>
+            <button class="icon-btn" id="btn-inspire-new" title="换一张灵感">⟳</button>
+          </div>
+          <div class="inspire-body" id="inspire-body"></div>
+        </aside>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ===== 弹窗根节点 ===== -->
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script>
+  // 桌面软件内嵌模式桥接：视频软件加载本页时自动注入；普通浏览器打开时安全跳过
+  window.mochuanBridgeReady = false;
+  if (window.QWebChannel && window.qt && window.qt.webChannelTransport) {
+    new QWebChannel(qt.webChannelTransport, function (channel) {
+      window.pyBridge = channel.objects.bridge;
+      window.mochuanBridgeReady = !!window.pyBridge;
+    });
+  }
+</script>
+<script src="js/utils.js"></script>
+<script src="js/content.js"></script>
+<script src="js/prose.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/store.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
