@@ -665,13 +665,20 @@
     chapter.updatedAt = MQ.now();
     novel.updatedAt = MQ.now();
     novel.wordCount = novel.chapters.reduce((s, c) => s + (c.wordCount || 0), 0);
+
+    // 自动生成章节摘要：取前 100 字，保持简洁
+    if (!chapter.summary || chapter.summary.length < 10) {
+      const plain = text.replace(/\s+/g, '').slice(0, 120);
+      chapter.summary = plain.length > 100 ? plain.slice(0, 97) + '……' : plain;
+    }
+
     return chapter;
   }
 
   /* ============================================================
      续写本章（在现有文本末尾追加 2-3 段）
      ============================================================ */
-  function continueChapter(novel, idx, existingText, styleId, variant, mood) {
+  function continueChapter(novel, idx, existingText, styleId, variant, mood, perspective) {
     const chapter = novel.chapters[idx];
     // variant（0/1/2…）用于多版本续写：不同 seed 走不同的情节组合，产出互异的候选
     const rng = MQ.makeRng(novel.seed + 500 + idx * 29 + (existingText ? MQ.countChars(existingText) : 1) + (variant || 0) * 777 + (mood ? MQ.hashSeed(mood) : 0));
@@ -748,7 +755,26 @@
       bits.splice(Math.max(1, rng.int(1, bits.length)), 0, P().applyStyle(style, MQ.polish(ph), '', rng));
     }
 
-    const extra = MQ.polish(MQ.dedupeText(bits.map(b => P().applyStyle(style, MQ.polish(b), '', rng)).join('\n\n')));
+    let extra = MQ.polish(MQ.dedupeText(bits.map(b => P().applyStyle(style, MQ.polish(b), '', rng)).join('\n\n')));
+
+    // 视角转换：根据用户选择的人称重写续写部分
+    if (perspective && extra) {
+      const heroName = novel.hero.name;
+      if (perspective === '第一人称') {
+        // 第三人称 → 第一人称：把角色名替换为「我」，「他/她」也替换
+        extra = extra.replace(new RegExp(heroName, 'g'), '我');
+        extra = extra.replace(/他(?=[，。！？、])/g, '我');
+        extra = extra.replace(/她(?=[，。！？、])/g, '我');
+        extra = extra.replace(/他的/g, '我的');
+        extra = extra.replace(/她的/g, '我的');
+      } else if (perspective === '第三人称限知') {
+        // 上帝视角 → 限知：移除全知叙述，保留角色视角
+        extra = extra.replace(/然而.*?并不知道/g, '然而我并不知道');
+        extra = extra.replace(/与此同时.*?正在/g, '与此同时我正在');
+      }
+      // 上帝视角：不做转换（已经是默认的第三人称全知）
+    }
+
     chapter.text = existingText ? MQ.polish(existingText + '\n\n' + extra) : extra;
     chapter.wordCount = MQ.countChars(chapter.text);
     novel.wordCount = novel.chapters.reduce((s, c) => s + (c.wordCount || 0), 0);

@@ -20,6 +20,7 @@
     selectedRelNode: '',   // 关系图中选中的节点
     fsOpen: false,         // 大纲页：伏笔追踪面板展开
     fsFilter: 'all',       // 伏笔筛选：all | done | pending
+    tlOpen: false,         // 大纲页：时间线面板展开
   };
 
   /* ---------- 写作台草稿自动保存 ---------- */
@@ -29,6 +30,57 @@
 
   // 当前写作台可执行的动作（由 renderWriterTab 刷新，供键盘快捷键调用）
   let writerShortcuts = null; // { generate, cont, save, prev, next }
+
+  /* ---------- 编辑器撤销/重做 ---------- */
+  const undoStack = []; // [{ text, cursorOffset }]
+  const redoStack = [];
+  const UNDO_MAX = 50;
+  let lastUndoSnapshot = ''; // 防抖：内容未变不压栈
+
+  function pushUndo(text) {
+    if (text === lastUndoSnapshot) return; // 内容没变，跳过
+    undoStack.push({ text: lastUndoSnapshot, ts: Date.now() });
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+    redoStack.length = 0; // 新操作清空重做栈
+    lastUndoSnapshot = text;
+  }
+
+  function undo() {
+    if (!undoStack.length) return;
+    const pt = document.querySelector('.paper-text');
+    if (!pt) return;
+    const cur = pt.innerText;
+    // 当前状态压入重做栈
+    redoStack.push({ text: cur, ts: Date.now() });
+    // 弹出上一个状态
+    const prev = undoStack.pop();
+    pt.innerText = prev.text;
+    lastUndoSnapshot = prev.text;
+    // 同步到章节
+    const n = state.currentNovel;
+    if (n) {
+      const c = n.chapters[state.currentChapter];
+      if (c) { c.text = pt.innerText.trim(); c.wordCount = MQ.countChars(c.text); MQ.Store.upsertNovel(n); }
+    }
+    toast('已撤销', 'ok');
+  }
+
+  function redo() {
+    if (!redoStack.length) return;
+    const pt = document.querySelector('.paper-text');
+    if (!pt) return;
+    const cur = pt.innerText;
+    undoStack.push({ text: cur, ts: Date.now() });
+    const next = redoStack.pop();
+    pt.innerText = next.text;
+    lastUndoSnapshot = next.text;
+    const n = state.currentNovel;
+    if (n) {
+      const c = n.chapters[state.currentChapter];
+      if (c) { c.text = pt.innerText.trim(); c.wordCount = MQ.countChars(c.text); MQ.Store.upsertNovel(n); }
+    }
+    toast('已重做', 'ok');
+  }
 
   /* ---------- 生成历史快照（每次生成本章/续写自动保存，最多 5 份） ---------- */
   // 存于书对象 novel.history = { [章节索引]: [{ text, ts, via, ai, wc }] }
@@ -257,6 +309,32 @@
     window.scrollTo(0, 0);
   }
 
+  /* ---- 书架 SVG 封面生成 ---- */
+  function generateBookCover(n) {
+    const genreColors = {
+      'xuanhuan': '#8b5cf6', 'xianxia': '#6366f1', 'dushi': '#3b82f6',
+      'kehuan': '#06b6d4', 'wuxia': '#d97706', 'xuanyi': '#64748b',
+      'yanqing': '#ec4899', 'lishi': '#92400e', 'qihuan': '#7c3aed',
+      'moshi': '#dc2626', 'wuxianliu': '#0891b2',
+    };
+    const bg = genreColors[n.genreId] || '#4a5568';
+    const title = (n.title || '未命名').slice(0, 6);
+    const lines = [];
+    for (let i = 0; i < title.length && i < 3; i++) {
+      lines.push(`<text x="50%" y="${38 + i * 22}" text-anchor="middle" fill="white" font-size="18" font-weight="bold" font-family="serif">${title[i]}</text>`);
+    }
+    if (title.length > 3) {
+      lines.push(`<text x="50%" y="${38 + 3 * 22}" text-anchor="middle" fill="white" font-size="18" font-weight="bold" font-family="serif">${title.slice(3)}</text>`);
+    }
+    return `<svg viewBox="0 0 80 110" xmlns="http://www.w3.org/2000/svg" style="width:100%;border-radius:6px">
+      <defs><linearGradient id="g${n.id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${bg}"/><stop offset="100%" stop-color="${bg}88"/></linearGradient></defs>
+      <rect width="80" height="110" rx="6" fill="url(#g${n.id})"/>
+      <line x1="10" y1="90" x2="70" y2="90" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+      <text x="50%" y="102" text-anchor="middle" fill="rgba(255,255,255,.6)" font-size="9" font-family="serif">${n.genreIcon || '📖'}</text>
+      ${lines.join('')}
+    </svg>`;
+  }
+
   /* ============================================================
      书架
      ============================================================ */
@@ -301,10 +379,13 @@
       const done = n.chapters ? n.chapters.filter(c => c.text).length : 0;
       const total = n.chapters ? n.chapters.length : 0;
       const pct = total ? Math.round(done / total * 100) : 0;
+      // 生成 SVG 封面
+      const coverSvg = generateBookCover(n);
       const card = MQ.el('div', {
         class: 'novel-card card',
         onclick: () => openNovel(n.id),
       }, [
+        MQ.el('div', { class: 'nc-cover', html: coverSvg }),
         MQ.el('div', { class: 'nc-title', text: n.title }),
         MQ.el('span', { class: 'nc-genre', text: `${n.genreIcon} ${n.genreName}` }),
         MQ.el('div', { class: 'nc-meta', text: `${MQ.countChars(n.chapters.map(c => c.text).join(''))} 字 · ${done}/${total} 章` }),
@@ -1051,12 +1132,20 @@ a{color:#777;text-decoration:none}
       }),
       MQ.el('button', { class: 'btn btn-ghost btn-sm', id: 'btn-regen-outline', text: '⟳ 重新生成大纲', onclick: () => regenerateOutline(n) }),
       MQ.el('button', {
+        class: 'btn btn-ghost btn-sm' + (state.tlOpen ? ' active' : ''),
+        id: 'btn-tl-toggle',
+        text: `📅 时间线`,
+        title: '按章节展示事件时间轴，一眼看清故事脉络',
+        onclick: () => { state.tlOpen = !state.tlOpen; renderOutlineTab(n); },
+      }),
+      MQ.el('button', {
         class: 'btn btn-primary btn-sm', text: '✍️ 一键生成全部正文',
         onclick: () => generateAllChapters(n),
       }),
     ]);
     tab.appendChild(toolbar);
     if (state.fsOpen) tab.appendChild(renderForeshadowPanel(n));
+    if (state.tlOpen) tab.appendChild(renderTimelinePanel(n));
 
     const cards = MQ.el('div', { class: 'chapter-cards' });
     const fsPlants = new Set(fsList.map(f => f.plantIdx));
@@ -1228,6 +1317,53 @@ a{color:#777;text-decoration:none}
       filtered.forEach(f => rows.appendChild(fsRow(n, f, statusOf(f))));
     }
     panel.appendChild(rows);
+    return panel;
+  }
+
+  /* ---- 时间线面板 ---- */
+  function renderTimelinePanel(n) {
+    const panel = MQ.el('div', { class: 'timeline-wrap card' });
+    const actColors = { 1: '#d4a643', 2: '#c95a3c', 3: '#58c08a' };
+    const actNames = { 1: '第一幕 · 起', 2: '第二幕 · 承转', 3: '第三幕 · 合' };
+
+    panel.appendChild(MQ.el('div', { class: 'tl-head' }, [
+      MQ.el('span', { class: 'tl-title', text: '📅 故事时间线' }),
+      MQ.el('span', { class: 'tl-count muted', text: `${n.chapters.length} 章 · ${n.chapters.filter(c => c.text).length} 章已写` }),
+    ]));
+
+    const tl = MQ.el('div', { class: 'tl-list' });
+    let lastAct = 0;
+    n.chapters.forEach((c, i) => {
+      // 幕分隔线
+      if (c.act && c.act !== lastAct) {
+        lastAct = c.act;
+        tl.appendChild(MQ.el('div', { class: 'tl-divider' }, [
+          MQ.el('span', { class: 'tl-div-line', style: `background:${actColors[c.act] || '#666'}` }),
+          MQ.el('span', { class: 'tl-div-text', text: actNames[c.act] || `第${c.act}幕` }),
+          MQ.el('span', { class: 'tl-div-line', style: `background:${actColors[c.act] || '#666'}` }),
+        ]));
+      }
+      // 时间线条目
+      const hasText = c.text && MQ.countChars(c.text) > 20;
+      const item = MQ.el('div', {
+        class: 'tl-item' + (hasText ? ' written' : ''),
+        title: `点击查看第${MQ.cnNum(i + 1)}章`,
+        onclick: () => selectChapter(i),
+      }, [
+        MQ.el('div', { class: 'tl-dot', style: `background:${actColors[c.act] || '#666'}` }),
+        MQ.el('div', { class: 'tl-line', style: `background:${actColors[c.act] || '#666'}` }),
+        MQ.el('div', { class: 'tl-content' }, [
+          MQ.el('div', { class: 'tl-chap', text: `第${MQ.cnNum(i + 1)}章 ${c.title}` }),
+          MQ.el('div', { class: 'tl-event', text: c.event || c.summary || '（未设置事件）' }),
+          MQ.el('div', { class: 'tl-meta' }, [
+            MQ.el('span', { class: 'tl-place', text: `📍${c.place || '未定'}` }),
+            hasText ? MQ.el('span', { class: 'tl-wc', text: `${c.wordCount || 0}字` }) : null,
+          ]),
+        ]),
+      ]);
+      tl.appendChild(item);
+    });
+    panel.appendChild(tl);
     return panel;
   }
 
@@ -2162,6 +2298,10 @@ a{color:#777;text-decoration:none}
         },
       }),
       MQ.el('button', {
+        class: 'btn btn-ghost', text: '📥 导入 TXT', title: '导入外部文本片段追加到当前章末尾',
+        onclick: () => importTxt(n),
+      }),
+      MQ.el('button', {
         class: 'btn btn-ghost', text: '⬇️ 导出',
         onclick: () => openExportModal(n),
       }),
@@ -2280,11 +2420,24 @@ a{color:#777;text-decoration:none}
     ]);
     tab.appendChild(contArea);
 
+    // 续写视角选择器（AI/本地均生效）
+    const perspectiveSel = MQ.el('select', {
+      class: 'paper-select', title: '续写视角', style: 'font-size:12px;width:auto;',
+      onchange: (e) => { const s = MQ.Store.getSettings(); s.perspective = e.target.value; MQ.Store.saveSettings(s); },
+    }, [
+      MQ.el('option', { value: '', text: '🎭 默认视角' }),
+      MQ.el('option', { value: '第一人称', text: '👤 第一人称' }),
+      MQ.el('option', { value: '第三人称限知', text: '👁 第三人称限知' }),
+      MQ.el('option', { value: '上帝视角', text: '🌍 上帝视角' }),
+    ]);
+    perspectiveSel.value = MQ.Store.getSettings().perspective || '';
+
     // 续写入口条（常驻，文章下方）
     const contBar = MQ.el('div', { class: 'cont-bar' }, [
       MQ.el('button', { class: 'btn btn-ghost', text: '➕ 续写本章', title: '从文章末尾继续（快捷键 Ctrl+Shift+Enter）', onclick: () => continueCurrent() }),
       MQ.el('button', { class: 'btn btn-ghost', text: '🎲 多版本续写', title: '一次生成 3 个不同走向的续写候选，选一个并入正文', onclick: () => multiContinue() }),
-      MQ.el('span', { class: 'cont-bar-note', text: '从当前文末继续往下写，生成过程在下方展开' }),
+      perspectiveSel,
+      MQ.el('span', { class: 'cont-bar-note', text: '选择视角后续写会按对应人称展开' }),
     ]);
     tab.appendChild(contBar);
 
@@ -2401,8 +2554,12 @@ a{color:#777;text-decoration:none}
       updateWriterStat();
       MQ.Store.autoSave(n);
     }, 700);
+    // 初始化撤销快照基准
+    lastUndoSnapshot = (c.text || '').trim();
     pt.addEventListener('input', () => { // 用户输入时清除跳转高亮，避免残留标记影响编辑
       pt.querySelectorAll('mark.mq-hl').forEach(m => m.replaceWith(document.createTextNode(m.textContent)));
+      // 撤销快照：防抖，每 800ms 最多压一次栈
+      pushUndo(pt.innerText.trim());
     });
     pt.addEventListener('input', save);
     pt.addEventListener('keydown', e => {
@@ -2775,6 +2932,35 @@ a{color:#777;text-decoration:none}
       }
     }
 
+    // 导入外部 TXT 文本追加到当前章末尾
+    function importTxt(n) {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.txt,.text';
+      input.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const content = reader.result.trim();
+          if (!content) { toast('文件内容为空', 'err'); return; }
+          // 推入撤销栈
+          pushUndo(pt.innerText.trim());
+          // 追加到编辑器末尾
+          const cur = pt.innerText.trim();
+          pt.innerText = cur ? cur + '\n\n' + content : content;
+          // 同步到章节
+          c.text = pt.innerText.trim();
+          c.wordCount = MQ.countChars(c.text);
+          MQ.Store.upsertNovel(n);
+          updateWriterStat();
+          toast(`已导入「${file.name}」（${MQ.countChars(content)} 字）✅`, 'ok');
+        };
+        reader.readAsText(file, 'UTF-8');
+      };
+      input.click();
+    }
+
     async function continueCurrent() {
       if (state.generating) return;
       if (c.rewrite) { c.rewrite = null; state.compareMode = 'orig'; }
@@ -2864,6 +3050,10 @@ a{color:#777;text-decoration:none}
       };
 
       try {
+        // 续写视角：从设置读取，传给引擎/AI
+        const perspective = MQ.Store.getSettings().perspective || '';
+        const perspectiveHint = perspective ? '【视角要求：' + perspective + '，请严格使用对应人称叙述】' : '';
+
         if (MQ.AI.activeEngine() === 'ai') {
           ac = new AbortController();
           await MQ.AI.continueChapterAI(n, state.currentChapter, existing, (delta) => {
@@ -2872,9 +3062,9 @@ a{color:#777;text-decoration:none}
           }, (a) => {
             tries = a;
             if (a > 1) contStatus.textContent = '⚠ 续写中断，正在第 ' + a + ' 次尝试…';
-          }, ac.signal);
+          }, ac.signal, perspectiveHint || undefined);
         } else {
-          const chapter = MQ.Engine.continueChapter(n, state.currentChapter, existing);
+          const chapter = MQ.Engine.continueChapter(n, state.currentChapter, existing, undefined, undefined, undefined, perspective);
           const newPart = chapter.text.slice(existing.length).split('\n\n');
           for (const para of newPart) {
             if (localCancelled) break;
@@ -4594,6 +4784,13 @@ ${bodyText || '<p>（本章暂无正文）</p>'}</body></html>`;
         ws.save();
         return;
       }
+      // Ctrl+Z 撤销 / Ctrl+Y 重写
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'Z') && isEditable) {
+        e.preventDefault(); undo(); return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'y' || e.key === 'Y') && isEditable) {
+        e.preventDefault(); redo(); return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         if (e.shiftKey) ws.cont(); else ws.generate();
@@ -4610,6 +4807,19 @@ ${bodyText || '<p>（本章暂无正文）</p>'}</body></html>`;
     bindCreateForm();
     updatePreview();
     showView('shelf');
+
+    // 写作提醒：检查今日是否有写作，没有则提示
+    setTimeout(() => {
+      const novels = MQ.Store.getNovels();
+      const today = new Date().toDateString();
+      const wroteToday = novels.some(n => {
+        const log = n.wcLog || [];
+        return log.some(e => new Date(e.ts).toDateString() === today);
+      });
+      if (!wroteToday && novels.length > 0) {
+        toast('📝 今天还没有写作哦，加油！', '');
+      }
+    }, 2000);
 
     // 欢迎提示
     setTimeout(() => {
