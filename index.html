@@ -3,7 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f0f17">
+<meta name="description" content="纯前端零依赖 AI 小说生成器 — 本地引擎打底 + AI 深度创作，11 题材 × 6 文风">
 <title>墨泉 · AI 小说生成器</title>
+<link rel="manifest" href="manifest.json">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700;900&family=ZCOOL+XiaoWei&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
@@ -19,8 +22,10 @@
       <span class="brand-sub">AI 小说生成器</span>
     </div>
     <div class="topbar-actions">
+      <button class="tbtn" id="btn-search" title="跨章节全文查找（Ctrl+Shift+F）"><span class="tbtn-ico">🔍</span>查找</button>
       <button class="tbtn" id="btn-shelf"><span class="tbtn-ico">📚</span>书架</button>
       <button class="tbtn" id="btn-ai"><span class="tbtn-ico" id="ai-status-dot">🤖</span>AI 设置</button>
+      <button class="tbtn" id="btn-theme" title="切换深色/浅色主题">🌓</button>
     </div>
   </header>
 
@@ -30,9 +35,39 @@
       <div class="shelf-hero">
         <h1 class="shelf-title">你的小说世界</h1>
         <p class="shelf-desc">从一句话开始，生成大纲、角色与完整正文。<br>本地引擎离线可用，配置 AI 后智能程度再上一层。</p>
-        <button class="btn btn-primary btn-lg" id="btn-new-novel"><span>＋</span> 创作新小说</button>
+        <div class="shelf-actions">
+          <button class="btn btn-primary btn-lg" id="btn-new-novel"><span>＋</span> 创作新小说</button>
+          <button class="btn btn-ghost btn-lg" id="btn-import-book" title="从备份文件（.mq.json）恢复整本书">⬆️ 导入备份</button>
+          <button class="btn btn-ghost btn-lg" id="btn-stats" title="写作统计">📊 统计</button>
+          <span class="shelf-sort-label">排序</span>
+          <select id="shelf-sort" class="shelf-sort-select">
+            <option value="updated">🕐 最近更新</option>
+            <option value="words">📝 总字数</option>
+            <option value="progress">📊 完成度</option>
+          </select>
+        </div>
       </div>
       <div class="shelf-grid" id="shelf-grid"></div>
+    </section>
+
+    <!-- ===== 统计视图 ===== -->
+    <section id="view-stats" class="view hidden">
+      <div class="stats-head">
+        <h2>📊 写作统计</h2>
+        <div class="stats-head-right">
+          <span class="st-goal-label">每日目标</span>
+          <select id="st-goal" class="st-goal-select">
+            <option value="300">300 字</option>
+            <option value="500" selected>500 字</option>
+            <option value="800">800 字</option>
+            <option value="1000">1000 字</option>
+            <option value="2000">2000 字</option>
+          </select>
+          <button class="btn btn-ghost" id="btn-back-shelf">← 返回书架</button>
+          <button class="btn btn-ghost btn-sm" id="btn-stats-export" title="导出为可分享的 HTML 报告">📤 导出报告</button>
+        </div>
+      </div>
+      <div class="stats-body" id="stats-body"></div>
     </section>
 
     <!-- ===== 创建向导视图 ===== -->
@@ -66,15 +101,22 @@
               <input type="text" id="f-protagonist" placeholder="例：苏晚晴" maxlength="10">
             </div>
             <div class="field">
-              <label>文风</label>
-              <select id="f-style">
-                <option value="ancient">古风典雅</option>
-                <option value="fierce" selected>热血激昂</option>
-                <option value="mystery">冷峻悬疑</option>
-                <option value="lyric">细腻文艺</option>
-                <option value="humor">诙谐轻快</option>
-                <option value="epic">史诗宏阔</option>
-              </select>
+              <label>文风 <span class="hint">（可自定义）</span></label>
+              <div class="style-row">
+                <select id="f-style">
+                  <option value="ancient">古风典雅</option>
+                  <option value="fierce" selected>热血激昂</option>
+                  <option value="mystery">冷峻悬疑</option>
+                  <option value="lyric">细腻文艺</option>
+                  <option value="humor">诙谐轻快</option>
+                  <option value="epic">史诗宏阔</option>
+                </select>
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-manage-styles" title="创建 / 编辑自定义文风">🎨 管理</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>叙事模板 <span class="hint">（决定大纲结构）</span></label>
+              <div class="template-chips" id="template-chips"></div>
             </div>
           </div>
 
@@ -119,11 +161,13 @@
           <div class="studio-tabs" id="studio-tabs">
             <button class="stab active" data-tab="outline">📜 大纲</button>
             <button class="stab" data-tab="characters">👥 角色</button>
+            <button class="stab" data-tab="places">🏙️ 地点</button>
             <button class="stab" data-tab="writer">✍️ 写作台</button>
           </div>
 
           <div class="studio-tabpane active" id="tab-outline"></div>
           <div class="studio-tabpane" id="tab-characters"></div>
+          <div class="studio-tabpane" id="tab-places"></div>
           <div class="studio-tabpane" id="tab-writer"></div>
         </div>
 
@@ -161,5 +205,11 @@
 <script src="js/ai.js"></script>
 <script src="js/store.js"></script>
 <script src="js/app.js"></script>
+<script>
+// 注册 PWA Service Worker（离线缓存）
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+</script>
 </body>
 </html>

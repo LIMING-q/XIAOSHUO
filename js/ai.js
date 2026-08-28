@@ -200,14 +200,31 @@
       '你是一位资深中文小说作家，文笔老练，擅长网文与严肃文学之间的叙事。',
       `当前作品题材：${novel.genreName}（${genre.desc}）。`,
       `全书文风要求：${style.name}——${style.desc}`,
+    ];
+    // 自定义文风：把用户喂入的特色词汇 / 句式一并给 AI，保证深度创作也贴合
+    if (style.custom) {
+      const s = [];
+      if (style.words && style.words.length) s.push(`文风特色词汇（请在描写中自然融入）：${style.words.slice(0, 12).join('、')}`);
+      if (style.phrases && style.phrases.length) {
+        const filled = style.phrases.slice(0, 3).map(p => MQ.fill(p, {
+          hero: novel.hero.name,
+          place: chapter && chapter.place ? chapter.place : '',
+          ally: novel.characters[1] ? novel.characters[1].name : '故人',
+        }));
+        s.push(`句式示例（可模仿其语气与节奏）：${filled.map(p => '「' + p + '」').join('')}`);
+      }
+      if (s.length) system.push(s.join(' '));
+    }
+    system.push(
       '写作要求：',
       '1. 只输出小说正文，不要输出章节标题、不要输出任何解释、不要用 markdown 标题。',
       '2. 用中文第三人称写作，围绕主角展开。',
       '3. 段落分明，对话符合人物性格，适当加入环境与心理描写。',
-      '4. 本章字数控制在 1100–1600 字。',
+      `4. 本章字数控制在 ${(chapter.targetWc || 1000)}–${Math.round((chapter.targetWc || 1000) * 1.5)} 字。`,
+      `   （该章目标为 ${chapter.targetWc || 1000} 字，请在此范围内发挥。）`,
       '5. 保持前后文连贯，注意承接上一章结尾的悬念。',
       '6. 结尾留一个自然的悬念或余韵。',
-    ].join('\n');
+    );
 
     const user = [
       `《${novel.title}》（${novel.genreName}）`,
@@ -215,6 +232,7 @@
       `核心冲突：${novel.conflict}`,
       `主角：${novel.hero.name}（${novel.identity}，性格：${novel.hero.personaOuter}、${novel.hero.personaInner}。背景：${novel.hero.backstory}）`,
       `主要角色：\n${charLines}`,
+      (novel.relations && novel.relations.length ? `角色关系：\n${novel.relations.map(r => `- ${r.from} ↔ ${r.to}：${r.type}`).join('\n')}` : ''),
       '',
       `【本章任务】第 ${novel.chapters.indexOf(chapter) + 1} 章「${chapter.title}」`,
       `本章定位（${['引子', '日常', '触发', '启程', '探索', '相遇', '试炼', '逼近', '低谷', '转机', '决战', '代价', '收束', '尾声'][{intro:0,daily:1,incite:2,depart:3,explore:4,meet:5,trial:6,approach:7,low:8,rally:9,climax:10,cost:11,resolve:12,after:13}[chapter.beat] || 0]}）`,
@@ -230,10 +248,13 @@
   }
 
   /* ---------- 用 AI 生成一章（流式回调 onDelta，中断自动重试并保留已生成部分） ---------- */
-  async function generateChapterAI(novel, idx, onDelta, onAttempt, signal) {
+  async function generateChapterAI(novel, idx, onDelta, onAttempt, signal, direction) {
     const chapter = novel.chapters[idx];
     const prev = idx > 0 && novel.chapters[idx - 1] ? novel.chapters[idx - 1].text : '';
     const baseMessages = buildMessages(novel, chapter, prev);
+    if (direction) {
+      baseMessages.push({ role: 'user', content: `请把本章剧情偏向「${direction}」的方向展开，但仍与大纲设定保持衔接一致。` });
+    }
     const text = await withRetryStream(async (partial, emit, sig) => {
       const messages = baseMessages.slice();
       if (partial) {
@@ -253,12 +274,13 @@
   }
 
   /* ---------- 用 AI 续写本章（流式回调 onDelta，中断自动重试并保留已生成部分） ---------- */
-  async function continueChapterAI(novel, idx, existingText, onDelta, onAttempt, signal) {
+  async function continueChapterAI(novel, idx, existingText, onDelta, onAttempt, signal, direction) {
     const chapter = novel.chapters[idx];
     const baseMessages = buildMessages(novel, chapter, existingText);
     baseMessages.push({
       role: 'user',
-      content: '请直接续写当前章节，从【前文】结束的地方继续往下写，约 400–700 字，保持人物与语气完全一致。',
+      content: '请直接续写当前章节，从【前文】结束的地方继续往下写，约 400–700 字，保持人物与语气完全一致。' +
+        (direction ? `续写时请偏向「${direction}」的方向展开，但仍与既有剧情自然衔接。` : ''),
     });
     const text = await withRetryStream(async (partial, emit, sig) => {
       const messages = baseMessages.slice();
@@ -411,24 +433,37 @@
     throw lastErr;
   }
 
-  // 从模型输出中稳健提取 JSON 数组（容忍代码块 / 前后说明文字 / 尾部含 ] 的补充句）
+  // 从模型输出中稳健提取 JSON（数组或对象）：容忍代码块 / 前后说明文字 / 尾部补充句
   function extractJSON(text) {
     let t = String(text || '').trim();
-    t = t.replace(/```json/gi, '').replace(/```/g, '');
-    const start = t.indexOf('[');
-    if (start < 0) return null;
-    // 从末尾的每个 ] 往前试解析，避免尾部补充文字里的括号干扰
-    for (let end = t.length; end > start; end--) {
-      if (t[end - 1] === ']') {
-        try { return JSON.parse(t.slice(start, end)); } catch (e) { /* 继续往前找 */ }
+    t = t.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const tryParse = (start, closer) => {
+      for (let end = t.length; end > start; end--) {
+        if (t[end - 1] === closer) {
+          try { return JSON.parse(t.slice(start, end)); } catch (e) { /* 继续往前找 */ }
+        }
       }
-    }
-    return null;
+      return null;
+    };
+    // 干净输出：以 { 或 [ 开头，直接按对应括号解析（对象内可能含数组值，必须整块解析）
+    if (t[0] === '{') { const r = tryParse(0, '}'); if (r) return r; }
+    if (t[0] === '[') { const r = tryParse(0, ']'); if (r) return r; }
+    // 容错：前面有说明文字时，取最先出现的 { 或 [ 作为起点，用对应的闭合括号
+    const startO = t.indexOf('{');
+    const startA = t.indexOf('[');
+    const start = (startO < 0) ? startA : (startA < 0 ? startO : Math.min(startO, startA));
+    if (start < 0) return null;
+    const closer = t[start] === '{' ? '}' : ']';
+    return tryParse(start, closer);
   }
 
-  const ACT1_BEATS = ['intro', 'daily', 'incite', 'depart'];
-  const ACT3_BEATS = ['climax', 'cost', 'resolve', 'after'];
-  const ALL_BEATS = ACT1_BEATS.concat(['explore', 'meet', 'trial', 'approach', 'low', 'rally'], ACT3_BEATS);
+  const HERO_BEATS = ['ordWorld','call','refusal','mentor','crossing','tests','ordeal','reward','roadBack','resurrect','elixir'];
+  const SEVEN_BEATS = ['hook','plotTurn1','trigger','midpoint','pinch','plotTurn2'];
+  const CAT_BEATS = ['opening','theme','setup','catalyst','debate','break2','bStory','fun','badGuys','allLost','darkNight','break3','finale','finalImg'];
+  const ACT1_BEATS = ['intro', 'daily', 'incite', 'depart'].concat(['ordWorld','call','refusal','mentor','crossing'], ['hook','plotTurn1'], ['opening','theme','setup','catalyst','debate']);
+  const ACT3_BEATS = ['climax', 'cost', 'resolve', 'after'].concat(['roadBack','resurrect','elixir'], ['plotTurn2'], ['break3','finale','finalImg','allLost','darkNight']);
+  const ALL_BEATS = ACT1_BEATS.concat(['explore', 'meet', 'trial', 'approach', 'low', 'rally'], ACT3_BEATS)
+    .concat(HERO_BEATS, SEVEN_BEATS, CAT_BEATS);
 
   function actOfBeat(beat) {
     if (ACT1_BEATS.includes(beat)) return 1;
@@ -441,15 +476,19 @@
   async function generateOutlineAI(novel, onAttempt, signal) {
     const genre = MQ.Content.getGenre(novel.genreId);
     const total = MQ.Engine.resolveChapterCount(novel);
+    const tmpl = MQ.Engine.getTemplate(novel.template || 'three-act');
+    const tmplBeats = tmpl.beats.flat();
+    const p = tmpl.proportions;
     const system = [
-      '你是一位资深中文小说大纲策划师，深谙网文三幕结构与「起承转合」节奏。',
+      '你是一位资深中文小说大纲策划师。',
+      `请使用「${tmpl.name}」叙事结构——${tmpl.desc}。`,
       `题材：${novel.genreName}（${genre.desc}）。全书文风：${MQ.Prose.getStyle(novel.styleId).name}。`,
       '输出要求：',
       '1. 只输出一个 JSON 数组，不要任何多余文字、注释或代码块标记。',
       `2. 数组共 ${total} 个元素，每个元素为：{"title":"章节标题","summary":"一章剧情完整摘要(40-80字)","place":"发生地点","beat":"结构标记"}。`,
-      `3. beat 只能取：${ALL_BEATS.join('、')}。`,
-      '4. 按三幕结构排列：第一幕（引子→启程）约占 25%，第二幕（探索→转机）约占 50%，第三幕（决战→尾声）约占 25%，最后一章为尾声。',
-      '5. 标题要有网文味道、带悬念与画面感，不要用「第一章」「第二章」这类命名。',
+      `3. beat 只能取：${tmplBeats.join('、')}。`,
+      `4. 按${tmpl.name}排列：第一组约占 ${Math.round(p[0]*100)}%，第二组约占 ${Math.round(p[1]*100)}%，第三组约占 ${Math.round(p[2]*100)}%。`,
+      '5. 标题要有网文味道、带悬念与画面感。',
       '6. 中段埋设 2 处伏笔，尾段对应回收。',
     ].join('\n');
     const user = [
@@ -480,7 +519,7 @@
       return chapters.map((raw, i) => {
       const beat = ALL_BEATS.includes(raw.beat)
         ? raw.beat
-        : (i < chapters.length * 0.25 ? 'daily' : i < chapters.length * 0.75 ? 'explore' : 'resolve');
+        : (i < chapters.length * p[0] ? tmplBeats[0] : i < chapters.length * (p[0]+p[1]) ? tmplBeats[Math.floor(tmplBeats.length/2)] : tmplBeats[tmplBeats.length-1]);
       return {
         idx: i,
         beat,
@@ -585,6 +624,137 @@
     return { text: res.content, styleId, styleName: style.name, wordCount: MQ.countChars(res.content) };
   }
 
+  /* ---------- AI 审稿：对本章做多维度评审 ---------- */
+  async function reviewChapterAI(novel, idx, signal) {
+    const chapter = novel.chapters[idx];
+    if (!chapter || !chapter.text) throw new Error('本章没有内容可供审稿');
+    const genre = MQ.Content.getGenre(novel.genreId);
+    const style = MQ.Prose.getStyle(novel.styleId);
+
+    const charBrief = novel.characters.map(c =>
+      `- ${c.name}（${c.role}）：${c.personaOuter}、${c.personaInner}`
+    ).join('\n');
+
+    const outlineCtx = (novel.outline && novel.outline.arcs)
+      ? novel.outline.arcs.map(a => a.name + '：' + a.chapters.map(c => c.title).join('→')).join(' | ')
+      : '';
+
+    const system = [
+      '你是一位资深文学编辑，专精中文小说的审稿与点评。',
+      '请对以下章节做多维度审稿，以 JSON 格式返回，格式如下：',
+      '{"rhythm":"节奏分析（100 字内）","dialogue":"对话点评（100 字内，标注 OOC 的台词）","foreshadow":"伏笔检测（已满足/未回收/可增设）","trim":"可删减段落（引用原文短句+理由）","overall":"一句话总评"}',
+      '要求：每个字段不超过 150 字，trim 列出 1-3 处具体可删减的原文短句。',
+    ].join('\n');
+
+    const user = [
+      `作品：《${novel.title}》（${novel.genreName}）`,
+      `文风：${style.name}`,
+      `当前章：第${idx + 1}章「${chapter.title}」`,
+      `大纲主线：${outlineCtx}`,
+      '',
+      '【角色性格设定】',
+      charBrief,
+      '',
+      '【章节正文】',
+      chapter.text,
+    ].join('\n');
+
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ];
+
+    const res = await withRetry(async () => {
+      const r = await chat(messages, { stream: false, signal, temperature: 0.5 });
+      const parsed = extractJSON(r.content);
+      if (!parsed || typeof parsed.rhythm !== 'string') throw new Error('审稿解析失败，模型未返回有效 JSON');
+      return parsed;
+    }, { label: 'AI 审稿', signal });
+
+    // 标准化字段
+    return {
+      rhythm: res.rhythm || '',
+      dialogue: res.dialogue || '',
+      foreshadow: res.foreshadow || '',
+      trim: res.trim || '',
+      overall: res.overall || '',
+      chapterIdx: idx,
+    };
+  }
+
+  // AI 设定一致性检查：分析全书时间线 / 人物行为 / 设定冲突 / 情节遗漏，返回矛盾报告
+  // 返回 { summary, issues: [{ type, severity, chapter, desc, fix }] }，失败自动重试
+  async function consistencyCheckAI(novel, onAttempt, signal) {
+    const chapters = novel.chapters || [];
+    const written = chapters.filter(c => c.text);
+    if (!written.length) throw new Error('还没有任何已写章节，无法检查一致性');
+
+    const charBrief = (novel.characters || []).map(c =>
+      `- ${c.name}（${c.role}）：外在${c.personaOuter || '未知'}、内在${c.personaInner || '未知'}。目标：${c.goal || '未知'}`
+    ).join('\n');
+
+    // 每章上下文：标题 / 地点 / 摘要 + 正文节选（首 400 字），总量约 2 万字符封顶（长书优先保留前段，时间线问题通常出现在前后对比）
+    const MAX_TOTAL = 20000;
+    let budget = MAX_TOTAL;
+    const parts = [];
+    for (const c of chapters) {
+      if (budget <= 0) break;
+      const excerpt = c.text ? c.text.slice(0, 400) : '';
+      const block = `【第${c.idx + 1}章 ${c.title}】地点：${c.place || '未知'}｜节拍：${c.beat || ''}\n摘要：${c.summary || ''}\n正文节选：${excerpt}${c.text && c.text.length > 400 ? '…' : ''}`;
+      parts.push(block);
+      budget -= block.length;
+    }
+    const bookCtx = parts.join('\n\n');
+
+    const system = [
+      '你是一位严谨的中文小说设定质检员，负责检查长篇小说的前后一致性。',
+      '请通读全书上下文，找出以下类型的矛盾：',
+      '1. 时间线矛盾：时间顺序错乱、相隔时间对不上、同一天内发生不可能的事、昼夜/季节矛盾。',
+      '2. 人物行为矛盾：角色言行与其性格/目标/立场明显不符，或前后冲突；已死/已离开的角色又出现。',
+      '3. 设定冲突：地名、称呼、身份、能力、物品前后不一致。',
+      '4. 情节遗漏：伏笔埋了没收、明确要做的事被遗忘。',
+      '只报告真实存在、有原文依据的矛盾，不要编造；没有则 issues 返回空数组。',
+      '以 JSON 返回，格式如下：',
+      '{"summary":"总体结论（60 字内）","issues":[{"type":"时间线|人物行为|设定冲突|情节遗漏","severity":"高|中|低","chapter":"第N章 章节名","desc":"矛盾描述（80 字内，引用原文依据）","fix":"修改建议（60 字内）"}]}',
+      'issues 最多 10 条，按严重度排序；完全没有矛盾时 issues 为空数组。',
+    ].join('\n');
+
+    const user = [
+      `作品：《${novel.title}》（${novel.genreName}），共 ${chapters.length} 章，已写 ${written.length} 章。`,
+      `核心冲突：${novel.conflict || '未知'}`,
+      '',
+      '【角色设定】',
+      charBrief,
+      '',
+      '【全书章节（含正文节选）】',
+      bookCtx,
+    ].join('\n');
+
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ];
+
+    const res = await withRetry(async (sig) => {
+      const r = await chat(messages, { stream: false, signal: sig, temperature: 0.4 });
+      const parsed = extractJSON(r.content);
+      if (!parsed || !Array.isArray(parsed.issues)) throw new Error('一致性检查解析失败，模型未返回有效 JSON');
+      return parsed;
+    }, { onAttempt, retries: retrySetting(), signal });
+
+    const TYPES = ['时间线', '人物行为', '设定冲突', '情节遗漏'];
+    const SEVS = ['高', '中', '低'];
+    const issues = (res.issues || []).slice(0, 10).map((x, i) => ({
+      id: 'cc-' + i,
+      type: TYPES.includes(x.type) ? x.type : '其他',
+      severity: SEVS.includes(x.severity) ? x.severity : '中',
+      chapter: String(x.chapter || '').trim(),
+      desc: String(x.desc || '').trim(),
+      fix: String(x.fix || '').trim(),
+    }));
+    return { summary: String(res.summary || '').trim(), issues, checkedAt: Date.now() };
+  }
+
   MQ.AI = {
     PROVIDERS,
     DEFAULT_BASE,
@@ -606,6 +776,8 @@
     generateOutlineAI,
     generateCharactersAI,
     rewriteChapterAI,
+    reviewChapterAI,
+    consistencyCheckAI,
   };
 
 })(window.MQ);
